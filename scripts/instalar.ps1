@@ -76,9 +76,9 @@ if (-not $phpDir) {
     }
     if (Test-Path $ini) {
         $c = Get-Content $ini
-        $c = $c -replace '^\s*;\s*extension_dir\s*=\s*"ext"\s*$', 'extension_dir = "ext"'
-        $c = $c -replace '^\s*;\s*extension\s*=\s*pdo_mysql\s*$', 'extension=pdo_mysql'
-        $c = $c -replace '^\s*;\s*extension\s*=\s*mysqli\s*$', 'extension=mysqli'
+        $c = $c -replace '^;extension_dir = "ext"\s*$', 'extension_dir = "ext"'
+        $c = $c -replace '^;extension=pdo_mysql\s*$', 'extension=pdo_mysql'
+        $c = $c -replace '^;extension=mysqli\s*$', 'extension=mysqli'
         Set-Content -Path $ini -Value $c
         Ok "Extensiones activadas en $ini"
     }
