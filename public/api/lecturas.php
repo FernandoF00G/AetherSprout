@@ -1,4 +1,6 @@
 <?php
+require __DIR__ . '/../../config/conexion.php';
+
 header('Content-Type: application/json; charset=utf-8');
 
 // Reglas de la Seccion 4. Devuelve un arreglo de errores (vacio = todo valido).
@@ -45,6 +47,33 @@ if ($errores) {
     exit;
 }
 
-// Parte 3: aqui se guardara la lectura en MariaDB.
-http_response_code(200);
-echo json_encode(['valida' => true, 'nota' => 'Aun no se guarda (Parte 3)']);
+try {
+    $pdo = obtener_conexion();
+
+    // fecha_hora no se envia: la asigna MariaDB (DEFAULT CURRENT_TIMESTAMP)
+    $insertar = $pdo->prepare(
+        'INSERT INTO lectura (humedad, temperatura, ph, ce)
+         VALUES (:humedad, :temperatura, :ph, :ce)'
+    );
+    $insertar->execute([
+        ':humedad'     => $_POST['humedad'],
+        ':temperatura' => $_POST['temperatura'],
+        ':ph'          => $_POST['ph'],
+        ':ce'          => $_POST['ce'],
+    ]);
+
+    $id = (int) $pdo->lastInsertId();
+    $consulta = $pdo->prepare('SELECT fecha_hora FROM lectura WHERE id = :id');
+    $consulta->execute([':id' => $id]);
+
+    http_response_code(201);
+    echo json_encode([
+        'guardada'   => true,
+        'id'         => $id,
+        'fecha_hora' => $consulta->fetchColumn(),
+    ]);
+} catch (PDOException $e) {
+    error_log('Error al guardar lectura: ' . $e->getMessage());
+    http_response_code(500);
+    echo json_encode(['error' => 'No se pudo guardar la lectura']);
+}
