@@ -56,7 +56,7 @@ try {
       <div class="col-6">
         <div class="card text-center h-100"><div class="card-body">
           <div class="text-muted">pH</div>
-          <div class="fs-2"><?= h(number_format((float) $lectura['ph'], 1, '.', '')) ?></div>
+          <div class="fs-2"><?= h(number_format((float) $lectura['ph'], 2, '.', '')) ?></div>
         </div></div>
       </div>
       <div class="col-6">

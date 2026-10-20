@@ -119,7 +119,7 @@ if ($pdo && $consultar) {
                   <td><?= h(substr($f['fecha_hora'], 11, 8)) ?></td>
                   <td class="text-end"><?= h(number_format((float) $f['humedad'], 1, '.', '')) ?></td>
                   <td class="text-end"><?= h(number_format((float) $f['temperatura'], 1, '.', '')) ?></td>
-                  <td class="text-end"><?= h(number_format((float) $f['ph'], 1, '.', '')) ?></td>
+                  <td class="text-end"><?= h(number_format((float) $f['ph'], 2, '.', '')) ?></td>
                   <td class="text-end"><?= h((int) $f['ce']) ?></td>
                 </tr>
               <?php endforeach; ?>
