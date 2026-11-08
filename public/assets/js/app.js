@@ -1,0 +1,214 @@
+/* AetherSprout - comportamiento minimo de la pantalla de valores actuales.
+   La pagina funciona sin JavaScript (PHP pinta los valores); este archivo
+   solo agrega: refresco cada 10 s, badge de conexion, captura de oxigeno
+   y el semaforo de rangos. Requiere jQuery. */
+(function ($) {
+  'use strict';
+
+  /* ---------------- Configuracion ---------------- */
+
+  var API = '/api/lecturas.php';
+  var INTERVALO_REFRESCO_MS = 10000;
+
+  /* Unidad del oxigeno: por confirmar con el responsable del invernadero
+     (la tabla dice "porosidad de aire %", el .md original proponia mg/L).
+     Mientras este vacia, la pantalla indica "unidad por confirmar". */
+  var UNIDAD_OXIGENO = '';
+
+  /* Rangos de referencia del responsable. CE en uS/cm (1 mS/cm = 1000 uS/cm).
+     El oxigeno NO entra al semaforo hasta aclarar su unidad. */
+  var RANGOS_POR_TIPO = {
+    fruto:   { nombre: 'Fruto (tomate, pimiento, pepino)',
+               humedad: [70, 85], temperatura: [18, 25], ph: [5.5, 6.8], ce: [1500, 2500] },
+    hoja:    { nombre: 'Hoja y flor (lechuga, espinaca, brocoli)',
+               humedad: [65, 75], temperatura: [10, 18], ph: [6.0, 7.2], ce: [1000, 1800] },
+    raiz:    { nombre: 'Raiz y tuberculo (zanahoria, rabano, papa)',
+               humedad: [55, 65], temperatura: [12, 20], ph: [5.5, 6.8], ce: [1200, 2000] },
+    semilla: { nombre: 'Semilla (legumbres)',
+               humedad: [50, 60], temperatura: [15, 22], ph: [6.0, 7.5], ce: [1000, 1500] }
+  };
+
+  var CLAVE_CULTIVO = 'cultivo_activo';
+  var DECIMALES = { humedad: 1, temperatura: 1, ph: 2, ce: 0, oxigeno: 2 };
+
+  /* ---------------- Cultivo elegido (solo en este navegador) ---------------- */
+
+  function leerCultivo() {
+    try {
+      var c = window.localStorage.getItem(CLAVE_CULTIVO);
+      return (c && RANGOS_POR_TIPO[c]) ? c : '';
+    } catch (e) { return ''; }
+  }
+
+  function guardarCultivo(c) {
+    try { window.localStorage.setItem(CLAVE_CULTIVO, c); } catch (e) { /* sin almacenamiento: queda solo en memoria */ }
+  }
+
+  var cultivo = leerCultivo();
+
+  /* ---------------- Semaforo ---------------- */
+
+  /* 'optimo', 'fuera' o null (sin cultivo, sin rango o sin valor) */
+  function evaluar(medida, valor) {
+    var tipo = RANGOS_POR_TIPO[cultivo];
+    if (!tipo || !tipo[medida] || valor === null || isNaN(valor)) { return null; }
+    return (valor >= tipo[medida][0] && valor <= tipo[medida][1]) ? 'optimo' : 'fuera';
+  }
+
+  function pintarSemaforo() {
+    var $aviso = $('#aviso-rangos');
+    if (!cultivo) {
+      $aviso.text('Rangos sin configurar').removeClass('d-none');
+    } else {
+      $aviso.text('Rangos: ' + RANGOS_POR_TIPO[cultivo].nombre).removeClass('d-none');
+    }
+
+    $('.tarjeta-medida').each(function () {
+      var $t = $(this);
+      var medida = $t.data('medida');
+      var crudo = $t.attr('data-valor');
+      var valor = (crudo === undefined || crudo === '') ? null : parseFloat(crudo);
+      var estado = evaluar(medida, valor);
+      var $badge = $t.find('.estado-rango');
+
+      $t.removeClass('border-danger border-success');
+      $t.find('.valor').removeClass('text-danger');
+      $badge.addClass('d-none').removeClass('bg-danger bg-success').text('');
+
+      if (estado === 'fuera') {
+        $t.addClass('border-danger');
+        $t.find('.valor').addClass('text-danger');
+        $badge.text('Fuera de rango').addClass('bg-danger').removeClass('d-none');
+      } else if (estado === 'optimo') {
+        $t.addClass('border-success');
+        $badge.text('Optimo').addClass('bg-success').removeClass('d-none');
+      }
+    });
+  }
+
+  /* ---------------- Tarjetas ---------------- */
+
+  function formato(medida, valor) {
+    return Number(valor).toFixed(DECIMALES[medida]);
+  }
+
+  function ponerValor(medida, valor) {
+    var $t = $('.tarjeta-medida[data-medida="' + medida + '"]');
+    if (!$t.length) { return; }
+    if (valor === null || valor === undefined) {
+      $t.attr('data-valor', '');
+      $t.find('.valor').text('--');
+    } else {
+      $t.attr('data-valor', valor);
+      $t.find('.valor').text(formato(medida, valor));
+    }
+  }
+
+  function fechaLegible(texto) {            // "2026-11-07 19:39:22" -> "07/11/2026 19:39:22"
+    var m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2})$/.exec(texto || '');
+    return m ? (m[3] + '/' + m[2] + '/' + m[1] + ' ' + m[4]) : '';
+  }
+
+  function pintarRespuesta(datos) {
+    var l = datos && datos.lectura;
+    var o = datos && datos.oxigeno;
+    if (l) {
+      ['humedad', 'temperatura', 'ph', 'ce'].forEach(function (m) { ponerValor(m, l[m]); });
+      $('#fecha-ultima').text(fechaLegible(l.fecha_hora));
+    }
+    if (o) {
+      ponerValor('oxigeno', o.oxigeno);
+      $('#fecha-oxigeno').text(fechaLegible(o.fecha_hora));
+    }
+    pintarSemaforo();
+  }
+
+  /* ---------------- Badge de conexion ---------------- */
+
+  function badge(enLinea) {
+    var $b = $('#badge-conexion');
+    if (enLinea) {
+      $b.removeClass('bg-warning text-dark').addClass('bg-success').text('En línea');
+    } else {
+      $b.removeClass('bg-success').addClass('bg-warning text-dark').text('Sin conexión - Modo local');
+    }
+  }
+
+  /* ---------------- Refresco ---------------- */
+
+  function refrescar() {
+    $.getJSON(API + '?accion=ultima')
+      .done(function (datos) { badge(true); pintarRespuesta(datos); })
+      .fail(function () { badge(false); });
+  }
+
+  /* ---------------- Captura manual de oxigeno ---------------- */
+
+  function mensaje(texto, clase) {
+    $('#msg-oxigeno').removeClass('text-success text-danger text-muted').addClass(clase).text(texto);
+  }
+
+  function enviarOxigeno(evento) {
+    evento.preventDefault();
+    var valor = $.trim($('#oxigeno').val());
+    if (valor === '') { mensaje('Escribe un valor.', 'text-danger'); return; }
+
+    $('#form-oxigeno button[type="submit"]').prop('disabled', true);
+    $.ajax({
+      url: API,
+      method: 'POST',
+      data: { tipo_registro: 'oxigeno_manual', oxigeno: valor },
+      dataType: 'json'
+    }).done(function () {
+      badge(true);
+      $('#oxigeno').val('');
+      mensaje('Guardado.', 'text-success');
+      refrescar();
+    }).fail(function (xhr) {
+      var r = xhr.responseJSON;
+      if (xhr.status === 400 && r && r.detalle && r.detalle.oxigeno) {
+        mensaje('Oxígeno ' + r.detalle.oxigeno + '.', 'text-danger');
+      } else if (xhr.status === 0) {
+        badge(false);
+        mensaje('Sin conexión: no se guardó.', 'text-danger');
+      } else {
+        mensaje('No se pudo guardar (error ' + xhr.status + ').', 'text-danger');
+      }
+    }).always(function () {
+      $('#form-oxigeno button[type="submit"]').prop('disabled', false);
+    });
+  }
+
+  /* ---------------- Arranque ---------------- */
+
+  $(function () {
+    // Unidad del oxigeno
+    if (UNIDAD_OXIGENO) {
+      $('#unidad-oxigeno').text(UNIDAD_OXIGENO).removeClass('fst-italic');
+    } else {
+      $('#unidad-oxigeno').text('unidad por confirmar').addClass('fst-italic');
+    }
+
+    // Selector de cultivo
+    var $sel = $('#selector-cultivo');
+    if ($sel.length) {
+      $.each(RANGOS_POR_TIPO, function (clave, tipo) {
+        $sel.append($('<option>').val(clave).text(tipo.nombre));
+      });
+      $sel.val(cultivo).on('change', function () {
+        cultivo = $(this).val();
+        guardarCultivo(cultivo);
+        pintarSemaforo();
+      });
+    }
+
+    $('#form-oxigeno').on('submit', enviarOxigeno);
+    $(window).on('offline', function () { badge(false); });
+    $(window).on('online', refrescar);
+
+    pintarSemaforo();
+    refrescar();
+    setInterval(refrescar, INTERVALO_REFRESCO_MS);
+  });
+
+})(jQuery);
