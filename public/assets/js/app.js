@@ -29,6 +29,11 @@
   };
 
   var CLAVE_CULTIVO = 'cultivo_activo';
+  var CLAVE_CACHE = 'ultima_lectura_cache';
+  var CLAVE_COLA = 'cola_oxigeno_offline';
+  var MAX_COLA = 50;                 // capturas de oxigeno que se guardan sin conexion
+  var MAX_ATRASO_S = 172800;         // 48 h, igual que la API
+  var TIMEOUT_MS = 5000;
   var DECIMALES = { humedad: 1, temperatura: 1, ph: 2, ce: 0, oxigeno: 2 };
 
   /* ---------------- Cultivo elegido (solo en este navegador) ---------------- */
@@ -45,6 +50,25 @@
   }
 
   var cultivo = leerCultivo();
+
+  /* Lectura/escritura segura de JSON en localStorage (si falla, no pasa nada) */
+  function leerJSON(clave, defecto) {
+    try {
+      var t = window.localStorage.getItem(clave);
+      return t ? JSON.parse(t) : defecto;
+    } catch (e) { return defecto; }
+  }
+
+  function guardarJSON(clave, valor) {
+    try { window.localStorage.setItem(clave, JSON.stringify(valor)); } catch (e) { /* sin almacenamiento */ }
+  }
+
+  function dos(n) { return (n < 10 ? '0' : '') + n; }
+
+  function horaLocal(ms) {
+    var d = new Date(ms);
+    return dos(d.getHours()) + ':' + dos(d.getMinutes()) + ':' + dos(d.getSeconds());
+  }
 
   /* ---------------- Semaforo ---------------- */
 
@@ -136,16 +160,150 @@
 
   /* ---------------- Refresco ---------------- */
 
+  /* ---------------- Cache local de la ultima lectura ---------------- */
+
+  function notaCache() {
+    var $n = $('#nota-cache');
+    if (!$n.length) {
+      $n = $('<span id="nota-cache" class="badge bg-secondary ms-2 d-none"></span>');
+      $('#fecha-ultima').after($n);
+    }
+    return $n;
+  }
+
+  /* Sin servidor: marca los valores en pantalla como "cache local". Solo si la
+     pantalla esta vacia se pintan los valores guardados. */
+  function mostrarCache() {
+    var c = leerJSON(CLAVE_CACHE, null);
+    if (!c || !c.datos) { return; }
+    if ($('#fecha-ultima').text() === '--') { pintarRespuesta(c.datos); }
+    notaCache().text('caché local · guardado ' + horaLocal(c.guardado)).removeClass('d-none');
+  }
+
+  function ocultarNotaCache() {
+    $('#nota-cache').addClass('d-none');
+  }
+
+  function sinConexion() {
+    badge(false);
+    mostrarCache();
+  }
+
+  /* ---------------- Refresco ---------------- */
+
   function refrescar() {
-    $.getJSON(API + '?accion=ultima')
-      .done(function (datos) { badge(true); pintarRespuesta(datos); })
-      .fail(function () { badge(false); });
+    $.ajax({ url: API + '?accion=ultima', dataType: 'json', timeout: TIMEOUT_MS })
+      .done(function (datos) {
+        badge(true);
+        ocultarNotaCache();
+        guardarJSON(CLAVE_CACHE, { datos: datos, guardado: Date.now() });
+        pintarRespuesta(datos);
+        enviarCola();
+      })
+      .fail(sinConexion);
   }
 
   /* ---------------- Captura manual de oxigeno ---------------- */
 
   function mensaje(texto, clase) {
-    $('#msg-oxigeno').removeClass('text-success text-danger text-muted').addClass(clase).text(texto);
+    $('#msg-oxigeno').removeClass('text-success text-danger text-warning text-muted').addClass(clase).text(texto);
+  }
+
+  /* Identificador de la captura: letras/numeros en minuscula + "-" + segundos.
+     Cumple el formato de la API (maximo 24 caracteres). Se genera ANTES de enviar,
+     asi un reintento no crea una segunda fila. */
+  function generarId() {
+    var r = (Math.random().toString(36) + '00000').slice(2, 7);
+    return 'nav' + r + '-' + Math.floor(Date.now() / 1000);
+  }
+
+  function datosOxigeno(item) {
+    return {
+      tipo_registro: 'oxigeno_manual',
+      oxigeno: item.valor,
+      id_origen: item.id,
+      segundos_atraso: Math.max(0, Math.floor((Date.now() - item.t) / 1000))
+    };
+  }
+
+  function enviarItem(item) {
+    return $.ajax({ url: API, method: 'POST', data: datosOxigeno(item),
+                    dataType: 'json', timeout: TIMEOUT_MS });
+  }
+
+  /* ---- Cola de capturas hechas sin conexion ---- */
+
+  function pintarPendientes() {
+    var n = leerJSON(CLAVE_COLA, []).length;
+    var $p = $('#pendientes-oxigeno');
+    if (!$p.length) {
+      $p = $('<div id="pendientes-oxigeno" class="small text-warning-emphasis d-none"></div>');
+      $('#msg-oxigeno').after($p);
+    }
+    if (n > 0) {
+      $p.text(n + (n === 1 ? ' captura de oxígeno pendiente de enviar' : ' capturas de oxígeno pendientes de enviar'))
+        .removeClass('d-none');
+    } else {
+      $p.addClass('d-none').text('');
+    }
+  }
+
+  function encolar(item) {
+    var cola = leerJSON(CLAVE_COLA, []);
+    if (cola.length >= MAX_COLA) {
+      mensaje('Sin conexión y la cola de este navegador está llena.', 'text-danger');
+      return;
+    }
+    cola.push(item);
+    guardarJSON(CLAVE_COLA, cola);
+    $('#oxigeno').val('');
+    mensaje('Sin conexión: guardado en este navegador, se enviará al reconectar.', 'text-warning');
+    pintarPendientes();
+  }
+
+  function quitarPrimeraDeLaCola() {
+    var cola = leerJSON(CLAVE_COLA, []);
+    cola.shift();
+    guardarJSON(CLAVE_COLA, cola);
+  }
+
+  var enviandoCola = false;
+
+  /* Envia la cola en orden. Se detiene en el primer fallo de red. */
+  function enviarCola() {
+    if (enviandoCola || leerJSON(CLAVE_COLA, []).length === 0) { return; }
+    enviandoCola = true;
+    var enviadas = 0, descartadas = 0;
+
+    function terminar() {
+      enviandoCola = false;
+      pintarPendientes();
+      if (enviadas > 0) {
+        mensaje(enviadas + (enviadas === 1 ? ' captura pendiente enviada.' : ' capturas pendientes enviadas.'), 'text-success');
+        refrescar();
+      }
+      if (descartadas > 0) {
+        mensaje(descartadas + (descartadas === 1 ? ' captura se descartó' : ' capturas se descartaron')
+                + ' (el servidor la rechazó o pasó de 48 h).', 'text-warning');
+      }
+    }
+
+    function siguiente() {
+      var cola = leerJSON(CLAVE_COLA, []);
+      if (cola.length === 0) { terminar(); return; }
+      var item = cola[0];
+
+      if ((Date.now() - item.t) / 1000 > MAX_ATRASO_S) {
+        quitarPrimeraDeLaCola(); descartadas++; siguiente(); return;
+      }
+      enviarItem(item)
+        .done(function () { quitarPrimeraDeLaCola(); enviadas++; siguiente(); })
+        .fail(function (xhr) {
+          if (xhr.status === 400) { quitarPrimeraDeLaCola(); descartadas++; siguiente(); }
+          else { terminar(); }
+        });
+    }
+    siguiente();
   }
 
   function enviarOxigeno(evento) {
@@ -153,13 +311,10 @@
     var valor = $.trim($('#oxigeno').val());
     if (valor === '') { mensaje('Escribe un valor.', 'text-danger'); return; }
 
+    var item = { valor: valor, id: generarId(), t: Date.now() };
+
     $('#form-oxigeno button[type="submit"]').prop('disabled', true);
-    $.ajax({
-      url: API,
-      method: 'POST',
-      data: { tipo_registro: 'oxigeno_manual', oxigeno: valor },
-      dataType: 'json'
-    }).done(function () {
+    enviarItem(item).done(function () {
       badge(true);
       $('#oxigeno').val('');
       mensaje('Guardado.', 'text-success');
@@ -169,8 +324,12 @@
       if (xhr.status === 400 && r && r.detalle && r.detalle.oxigeno) {
         mensaje('Oxígeno ' + r.detalle.oxigeno + '.', 'text-danger');
       } else if (xhr.status === 0) {
-        badge(false);
-        mensaje('Sin conexión: no se guardó.', 'text-danger');
+        sinConexion();
+        if (/^\d+(\.\d+)?$/.test(valor)) {
+          encolar(item);       // misma id y misma hora: si el envio si llego, no se duplica
+        } else {
+          mensaje('Debe ser un número positivo con punto decimal.', 'text-danger');
+        }
       } else {
         mensaje('No se pudo guardar (error ' + xhr.status + ').', 'text-danger');
       }
@@ -203,10 +362,11 @@
     }
 
     $('#form-oxigeno').on('submit', enviarOxigeno);
-    $(window).on('offline', function () { badge(false); });
+    $(window).on('offline', sinConexion);
     $(window).on('online', refrescar);
 
     pintarSemaforo();
+    pintarPendientes();
     refrescar();
     setInterval(refrescar, INTERVALO_REFRESCO_MS);
   });
