@@ -1,6 +1,6 @@
 # AetherSprout: monitor de invernadero
 
-**Estado: Sprint 1 en desarrollo**
+**Estado: Sprint 2 en desarrollo** (Sprint 1 cerrado, tag `sprint-1`; el avance está en la rama `sprint-2`)
 
 Proyecto Turing EC · Actividad AA6 "Del MVP al Sprint 1: diseño mínimo para comenzar a desarrollar".
 
