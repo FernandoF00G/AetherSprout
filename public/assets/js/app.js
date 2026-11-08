@@ -20,9 +20,9 @@
   var RANGOS_POR_TIPO = {
     fruto:   { nombre: 'Fruto (tomate, pimiento, pepino)',
                humedad: [70, 85], temperatura: [18, 25], ph: [5.5, 6.8], ce: [1500, 2500] },
-    hoja:    { nombre: 'Hoja y flor (lechuga, espinaca, brocoli)',
+    hoja:    { nombre: 'Hoja y flor (lechuga, espinaca, brócoli)',
                humedad: [65, 75], temperatura: [10, 18], ph: [6.0, 7.2], ce: [1000, 1800] },
-    raiz:    { nombre: 'Raiz y tuberculo (zanahoria, rabano, papa)',
+    raiz:    { nombre: 'Raíz y tubérculo (zanahoria, rábano, papa)',
                humedad: [55, 65], temperatura: [12, 20], ph: [5.5, 6.8], ce: [1200, 2000] },
     semilla: { nombre: 'Semilla (legumbres)',
                humedad: [50, 60], temperatura: [15, 22], ph: [6.0, 7.5], ce: [1000, 1500] }
@@ -81,7 +81,7 @@
         $badge.text('Fuera de rango').addClass('bg-danger').removeClass('d-none');
       } else if (estado === 'optimo') {
         $t.addClass('border-success');
-        $badge.text('Optimo').addClass('bg-success').removeClass('d-none');
+        $badge.text('Óptimo').addClass('bg-success').removeClass('d-none');
       }
     });
   }
