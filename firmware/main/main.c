@@ -13,6 +13,7 @@
 #include "esp_random.h"
 #include <stdio.h>
 #include "esp_http_client.h"
+#include "esp_timer.h"
 
 
 
@@ -71,6 +72,41 @@ typedef struct {
     int   ce;
 } lectura_t;
 
+/* ---- Buffer sin conexión (RF09) ---- */
+#define MAX_BUFFER_OFFLINE    60       /* lecturas que caben en RAM */
+#define MAX_ENVIOS_POR_CICLO  10       /* máximo de envíos al vaciar el buffer */
+#define MAX_ATRASO_S          172800   /* 48 h, igual que el servidor */
+
+typedef struct {
+    lectura_t lectura;
+    uint32_t  seq;      /* número de lectura desde el arranque */
+    int64_t   t_us;     /* instante de la muestra (esp_timer_get_time) */
+} lectura_pendiente_t;
+
+static lectura_pendiente_t s_buffer[MAX_BUFFER_OFFLINE];
+static int      s_inicio = 0;      /* posición de la lectura más antigua */
+static int      s_cuenta = 0;      /* lecturas pendientes */
+static uint32_t s_arranque = 0;    /* identificador de este arranque */
+static uint32_t s_seq = 0;
+
+/* Guarda una lectura; si el buffer está lleno, descarta la más antigua */
+static void buffer_agregar(const lectura_pendiente_t *p)
+{
+    if (s_cuenta == MAX_BUFFER_OFFLINE) {
+        ESP_LOGW(TAG, "Buffer lleno: se descarta la lectura mas antigua");
+        s_inicio = (s_inicio + 1) % MAX_BUFFER_OFFLINE;
+        s_cuenta--;
+    }
+    s_buffer[(s_inicio + s_cuenta) % MAX_BUFFER_OFFLINE] = *p;
+    s_cuenta++;
+}
+
+static void buffer_quitar_primera(void)
+{
+    s_inicio = (s_inicio + 1) % MAX_BUFFER_OFFLINE;
+    s_cuenta--;
+}
+
 /* Número aleatorio entre min y max */
 static float aleatorio(float min, float max)
 {
@@ -97,18 +133,27 @@ static bool lectura_valida(const lectura_t *l)
            l->ce >= 0;
 }
 
-/* Envía la lectura al servidor. Devuelve el código HTTP (201 = guardada)
+/* Envía una lectura al servidor, con su identificador y su atraso.
+   Devuelve el código HTTP (201 = guardada, 200 = ya estaba guardada)
    o -1 si no hubo respuesta. */
-static int enviar_lectura(const lectura_t *l)
+static int enviar_lectura(const lectura_pendiente_t *p, int64_t ahora_us)
 {
     char url[96];
     snprintf(url, sizeof(url), "http://%s:%d/api/lecturas.php",
              SERVER_IP, SERVER_PORT);
 
-    char cuerpo[128];
+    int64_t atraso_s = (ahora_us - p->t_us) / 1000000;
+    if (atraso_s < 0) {
+        atraso_s = 0;
+    }
+
+    char cuerpo[192];
     snprintf(cuerpo, sizeof(cuerpo),
-             "humedad=%.1f&temperatura=%.1f&ph=%.2f&ce=%d",
-             l->humedad, l->temperatura, l->ph, l->ce);
+             "humedad=%.1f&temperatura=%.1f&ph=%.2f&ce=%d"
+             "&id_origen=%08lx-%lu&segundos_atraso=%lu",
+             p->lectura.humedad, p->lectura.temperatura, p->lectura.ph,
+             p->lectura.ce, (unsigned long)s_arranque,
+             (unsigned long)p->seq, (unsigned long)atraso_s);
 
     esp_http_client_config_t cfg = {
         .url = url,
@@ -137,29 +182,40 @@ static int enviar_lectura(const lectura_t *l)
     return codigo;
 }
 
+/* Envía las lecturas pendientes, de la más antigua a la más nueva.
+   Se detiene en el primer fallo y manda máximo MAX_ENVIOS_POR_CICLO. */
+static void vaciar_buffer(void)
+{
+    int enviados = 0;
+    while (s_cuenta > 0 && enviados < MAX_ENVIOS_POR_CICLO) {
+        const lectura_pendiente_t *p = &s_buffer[s_inicio];
+        int64_t ahora_us = esp_timer_get_time();
+
+        if ((ahora_us - p->t_us) / 1000000 > MAX_ATRASO_S) {
+            ESP_LOGE(TAG, "Lectura %lu con mas de 48 h de atraso: se descarta",
+                     (unsigned long)p->seq);
+            buffer_quitar_primera();
+            continue;
+        }
+
+        int codigo = enviar_lectura(p, ahora_us);
+        if (codigo == 201 || codigo == 200) {
+            buffer_quitar_primera();       /* guardada, o ya estaba guardada */
+            enviados++;
+        } else if (codigo == 400) {
+            ESP_LOGE(TAG, "El servidor rechazo la lectura %lu: se descarta",
+                     (unsigned long)p->seq);
+            buffer_quitar_primera();
+            enviados++;
+        } else {
+            ESP_LOGW(TAG, "No se pudo enviar (codigo %d); se reintenta despues", codigo);
+            break;
+        }
+    }
+}
 
 void app_main(void)
 {
-    /*esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    ESP_LOGI(TAG, "Iniciando WiFi...");
-    wifi_init_sta();
-
-    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT,
-                        pdFALSE, pdTRUE, portMAX_DELAY);
-    ESP_LOGI(TAG, "WiFi listo");
-
-            lectura_t l = generar_lectura();
-    if (lectura_valida(&l)) {
-        enviar_lectura(&l);
-    }*/
-
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
         ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -171,24 +227,35 @@ void app_main(void)
     ESP_LOGI(TAG, "Iniciando WiFi...");
     wifi_init_sta();
 
-    while (1) {
-        /* Espera hasta 10 s a tener WiFi; si no hay, no envía y vuelve a esperar */
-        EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                               WIFI_CONNECTED_BIT,
-                                               pdFALSE, pdTRUE,
-                                               pdMS_TO_TICKS(10000));
-        if (bits & WIFI_CONNECTED_BIT) {
-            lectura_t l = generar_lectura();
-            if (lectura_valida(&l)) {
-                int codigo = enviar_lectura(&l);
-                if (codigo != 201) {
-                    ESP_LOGW(TAG, "El servidor no guardo la lectura (codigo %d)", codigo);
-                }
-            }
-            vTaskDelay(pdMS_TO_TICKS(SEND_INTERVAL_S * 1000));
-        } else {
-            ESP_LOGW(TAG, "Sin WiFi, no se envia; se reintenta...");
-        }
-    }
+    s_arranque = esp_random();     /* identifica este arranque en id_origen */
 
+    /* Al encender, da hasta 10 s para conectar; si no se logra, sigue y
+       las lecturas quedan en el buffer hasta que haya red. */
+    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT,
+                        pdFALSE, pdTRUE, pdMS_TO_TICKS(10000));
+
+    TickType_t ultimo_ciclo = xTaskGetTickCount();
+    while (1) {
+        /* Siempre toma la muestra, haya o no WiFi */
+        lectura_pendiente_t p;
+        p.lectura = generar_lectura();
+        if (lectura_valida(&p.lectura)) {
+            p.seq = ++s_seq;
+            p.t_us = esp_timer_get_time();
+            buffer_agregar(&p);
+        }
+
+        if (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) {
+            vaciar_buffer();
+        } else {
+            ESP_LOGW(TAG, "Sin WiFi: lectura guardada en el buffer");
+        }
+
+        if (s_cuenta > 0) {
+            ESP_LOGW(TAG, "Lecturas pendientes en el buffer: %d de %d",
+                     s_cuenta, MAX_BUFFER_OFFLINE);
+        }
+
+        vTaskDelayUntil(&ultimo_ciclo, pdMS_TO_TICKS(SEND_INTERVAL_S * 1000));
+    }
 }

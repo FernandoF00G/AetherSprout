@@ -15,7 +15,14 @@ $pdo = null;
 $error = null;
 $aviso = null;
 $por_franja = array_fill(0, 6, []);
+$ox_por_franja = array_fill(0, 6, []);
 $total = 0;
+$total_ox = 0;
+$aviso_ox = null;
+
+// Unidad del oxigeno: por confirmar con el responsable del invernadero.
+// Si se llena aqui, tambien hay que llenarla en public/assets/js/app.js (UNIDAD_OXIGENO).
+$unidad_oxigeno = '';
 $consultar = false;
 
 // obtener_conexion() tambien fija la zona horaria, por eso va antes de date()
@@ -60,6 +67,29 @@ if ($pdo && $consultar) {
         error_log('Error al consultar registros: ' . $e->getMessage());
         $error = 'No se pudo consultar la base de datos.';
     }
+
+    // El oxigeno se consulta aparte: si falla, las lecturas se muestran igual
+    if (!$error) {
+        try {
+            $consulta = $pdo->prepare(
+                'SELECT fecha_hora, oxigeno
+                 FROM lectura_oxigeno
+                 WHERE fecha_hora >= :inicio AND fecha_hora < :fin
+                 ORDER BY fecha_hora ASC, id ASC'
+            );
+            $consulta->execute([':inicio' => $inicio, ':fin' => $fin]);
+            $filas_ox = $consulta->fetchAll();
+
+            foreach ($filas_ox as $o) {
+                $hora = (int) substr($o['fecha_hora'], 11, 2);
+                $ox_por_franja[intdiv($hora, 4)][] = $o;
+            }
+            $total_ox = count($filas_ox);
+        } catch (PDOException $e) {
+            error_log('Error al consultar oxigeno: ' . $e->getMessage());
+            $aviso_ox = 'No se pudieron consultar las capturas de oxígeno.';
+        }
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -89,12 +119,21 @@ if ($pdo && $consultar) {
     <div class="alert alert-danger"><?= h($error) ?></div>
   <?php elseif ($aviso): ?>
     <div class="alert alert-warning"><?= h($aviso) ?></div>
-  <?php elseif ($total === 0): ?>
+  <?php elseif ($total === 0 && $total_ox === 0): ?>
+    <?php if ($aviso_ox): ?>
+      <div class="alert alert-warning"><?= h($aviso_ox) ?></div>
+    <?php endif; ?>
     <div class="alert alert-info">Sin registros para esa fecha.</div>
   <?php else: ?>
+    <?php if ($aviso_ox): ?>
+      <div class="alert alert-warning"><?= h($aviso_ox) ?></div>
+    <?php endif; ?>
     <p class="text-muted">
-      <?= h($total) ?> lectura<?= $total === 1 ? '' : 's' ?> del
-      <strong><?= h($dia->format('d/m/Y')) ?></strong>
+      <?= h($total) ?> lectura<?= $total === 1 ? '' : 's' ?>
+      <?php if ($total_ox > 0): ?>
+        y <?= h($total_ox) ?> captura<?= $total_ox === 1 ? '' : 's' ?> de oxígeno
+      <?php endif; ?>
+      del <strong><?= h($dia->format('d/m/Y')) ?></strong>
     </p>
 
     <?php foreach ($franjas as $i => $franja): ?>
@@ -121,6 +160,30 @@ if ($pdo && $consultar) {
                   <td class="text-end"><?= h(number_format((float) $f['temperatura'], 1, '.', '')) ?></td>
                   <td class="text-end"><?= h(number_format((float) $f['ph'], 2, '.', '')) ?></td>
                   <td class="text-end"><?= h((int) $f['ce']) ?></td>
+                </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        </div>
+      <?php endif; ?>
+
+      <?php if ($ox_por_franja[$i]): ?>
+        <div class="small fw-semibold mt-3 mb-1">
+          Oxígeno (captura manual)<?= $unidad_oxigeno !== '' ? ' · ' . h($unidad_oxigeno) : ' · unidad por confirmar' ?>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm table-bordered align-middle mb-0 w-auto">
+            <thead>
+              <tr>
+                <th>Hora</th>
+                <th class="text-end">Oxígeno</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach ($ox_por_franja[$i] as $o): ?>
+                <tr>
+                  <td><?= h(substr($o['fecha_hora'], 11, 8)) ?></td>
+                  <td class="text-end"><?= h(number_format((float) $o['oxigeno'], 2, '.', '')) ?></td>
                 </tr>
               <?php endforeach; ?>
             </tbody>
