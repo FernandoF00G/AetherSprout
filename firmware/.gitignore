@@ -79,3 +79,7 @@ Desktop.ini
 /main/config_local.h
 
 
+
+# Generados por ESP-IDF o el editor (no se suben)
+/.devcontainer/
+/README.md
