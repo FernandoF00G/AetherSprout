@@ -105,10 +105,59 @@ function es_duplicado(PDOException $e): bool
     return isset($e->errorInfo[1]) && (int) $e->errorInfo[1] === 1062;
 }
 
+// ---------- Identificacion de la placa (F1b) ----------
+
+// Comprueba los campos "dispositivo" y "clave" que manda el ESP32.
+// Devuelve ['id' => ..., 'ubicacion_id' => ...] o responde 401.
+// El mensaje es el mismo en todos los casos, para no dar pistas de que fallo.
+function autenticar_dispositivo(PDO $pdo, array $datos): array
+{
+    $ident = $datos['dispositivo'] ?? '';
+    $clave = $datos['clave'] ?? '';
+
+    if (!is_string($ident) || !preg_match('/^[a-z0-9-]{3,32}$/', $ident)
+        || !is_string($clave) || !preg_match('/^[0-9a-f]{32}$/', $clave)) {
+        responder(401, ['error' => 'Dispositivo no autorizado']);
+    }
+
+    $consulta = $pdo->prepare(
+        'SELECT id, ubicacion_id, clave_hash
+         FROM dispositivos
+         WHERE identificador = :identificador AND activo = 1'
+    );
+    $consulta->execute([':identificador' => $ident]);
+    $disp = $consulta->fetch();
+
+    if (!$disp || !password_verify($clave, $disp['clave_hash'])) {
+        responder(401, ['error' => 'Dispositivo no autorizado']);
+    }
+
+    // Ultimo contacto: sirve para saber si una placa dejo de reportar
+    $pdo->prepare('UPDATE dispositivos SET ultimo_contacto = NOW() WHERE id = :id')
+        ->execute([':id' => $disp['id']]);
+
+    return ['id' => (int) $disp['id'], 'ubicacion_id' => (int) $disp['ubicacion_id']];
+}
+
 // ---------- POST: guardar una lectura del ESP32 o un registro de oxigeno ----------
 
 function guardar_lectura(array $datos): void
 {
+    try {
+        $pdo = obtener_conexion();
+    } catch (PDOException $e) {
+        error_log('Error de conexion: ' . $e->getMessage());
+        responder(500, ['error' => 'No se pudo guardar la lectura']);
+    }
+
+    // Primero: quien envia. Sin dispositivo y clave validos no se revisa nada mas.
+    try {
+        $disp = autenticar_dispositivo($pdo, $datos);
+    } catch (PDOException $e) {
+        error_log('Error al autenticar dispositivo: ' . $e->getMessage());
+        responder(500, ['error' => 'No se pudo guardar la lectura']);
+    }
+
     $errores = validar_lectura($datos);
     if ($errores) {
         responder(400, ['error' => 'Lectura invalida', 'detalle' => $errores]);
@@ -116,16 +165,19 @@ function guardar_lectura(array $datos): void
     [$id_origen, $atraso] = datos_comunes($datos);
 
     try {
-        $pdo = obtener_conexion();
-
-        // La fecha no se recibe: es la del servidor menos el atraso (0 si llego al instante)
+        // La fecha no se recibe: es la del servidor menos el atraso (0 si llego al instante).
+        // El sitio sale del dispositivo; el plantio activo lo asigna la base (trigger de la 003).
         $insertar = $pdo->prepare(
             'INSERT INTO lectura
-               (fecha_hora, humedad, temperatura, ph, ce, id_origen, atraso_s)
+               (fecha_hora, humedad, temperatura, ph, ce, id_origen, atraso_s,
+                ubicacion_id, dispositivo_id)
              VALUES
                (DATE_SUB(NOW(), INTERVAL :atraso SECOND),
-                :humedad, :temperatura, :ph, :ce, :id_origen, :atraso_s)'
+                :humedad, :temperatura, :ph, :ce, :id_origen, :atraso_s,
+                :ubicacion_id, :dispositivo_id)'
         );
+        $insertar->bindValue(':ubicacion_id', $disp['ubicacion_id'], PDO::PARAM_INT);
+        $insertar->bindValue(':dispositivo_id', $disp['id'], PDO::PARAM_INT);
         $insertar->bindValue(':atraso', $atraso, PDO::PARAM_INT);
         $insertar->bindValue(':humedad', $datos['humedad']);
         $insertar->bindValue(':temperatura', $datos['temperatura']);
